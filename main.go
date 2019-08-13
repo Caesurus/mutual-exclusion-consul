@@ -22,6 +22,7 @@ type exclusiveWorkerConfig struct {
 type exclusiveWorker struct {
 	client         *api.Client // Consul client
 	key            string      // Worker Key (in other words taskID)
+	value          []byte      // value of key
 	sessionID      string      // Id of session created in consul
 	sessionTimeout string      // Session timeout
 }
@@ -34,6 +35,10 @@ func newExclusiveWorker(ewc *exclusiveWorkerConfig) *exclusiveWorker {
 		sessionTimeout: ewc.sessionTimeout,
 	}
 	return ew
+}
+
+func (ec *exclusiveWorker) getValue() []byte {
+	return ec.value
 }
 
 // Step1: Create session
@@ -61,14 +66,18 @@ func (ec *exclusiveWorker) createSession() error {
 // step2: Acquire Session
 // acquireSession basically creates the mutual exclusion lock
 func (ec *exclusiveWorker) acquireSession() (bool, error) {
-	KVpair := &api.KVPair{
-		Key:     ec.key,
-		Value:   []byte(ec.sessionID),
-		Session: ec.sessionID,
-	}
 
-	aquired, _, err := ec.client.KV().Acquire(KVpair, nil)
-	return aquired, err
+	KVpair, _, err := ec.client.KV().Get(ec.key, nil)
+	if nil != err {
+		fmt.Println(err)
+	}
+	if KVpair != nil {
+		ec.value = KVpair.Value
+		KVpair.Session = ec.sessionID
+		aquired, _, err := ec.client.KV().Acquire(KVpair, nil)
+		return aquired, err
+	}
+	return false, err
 }
 
 // We need to renew the session because the TTL will destroy
@@ -86,6 +95,7 @@ func (ec *exclusiveWorker) renewSession(doneChan <-chan struct{}) error {
 
 // destroySession destroys the session by triggering the behavior. So it will delete de Key as well
 func (ec *exclusiveWorker) destroySession() error {
+
 	_, err := ec.client.Session().Destroy(ec.sessionID, nil)
 	if err != nil {
 		erroMsg := fmt.Sprintf("ERROR cannot delete key %s: %s", ec.key, err)
@@ -104,7 +114,7 @@ func main() {
 
 	workerConf := &exclusiveWorkerConfig{
 		client:         client,
-		key:            "service/bobruner/leader",
+		key:            "app/subkey/subsubkey",
 		sessionTimeout: "15s",
 	}
 
@@ -139,13 +149,14 @@ func main() {
 	// doing some work
 	if canWork {
 		fmt.Println("I can work. YAY!!!")
+		fmt.Println(string(w.getValue()))
 
 		doneChan := make(chan struct{})
 		go w.renewSession(doneChan) // We send renewSession() to its own go routine
 
 		// Here we simulate the long running task
 		fmt.Println("Starting to work")
-		time.Sleep(30 * time.Second)
+		time.Sleep(10 * time.Second)
 		close(doneChan)
 		fmt.Println("Work done")
 
@@ -159,5 +170,5 @@ func main() {
 		return
 	}
 
-	fmt.Println("I can NOT work. YAY!!!")
+	fmt.Println("Can't acquire lock")
 }
